@@ -1,19 +1,32 @@
 import asyncio
 import aiohttp
-import time
 from bs4 import BeautifulSoup
 import os
+import csv
 from datetime import datetime
+from settings import USER_AGENT, LIMIT, TIMEOUT
 
 
 BASE_URL = 'https://pay.performancefoodservice.com/ngs'
 
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 ' \
-             'Safari/537.36'
 
-LIMIT = 10  # number of connections
+def load_location_settings():
+    locations = []
+    location_settings_file_path = 'location_settings.csv'
+    if not os.path.isfile(location_settings_file_path):
+        return None
+    with open(location_settings_file_path, 'r') as location_settings:
+        reader = csv.DictReader(location_settings)
+        for row in reader:
+            locations.append(row)
+    return locations
 
-TIMEOUT = 600  # seconds
+
+def get_location_folder_name(locations, account_name):
+    for location in locations:
+        if location.get('AccountName') == account_name:
+            return location.get('SubFolderName')
+    return ''
 
 
 async def login_load_page(sema, session):
@@ -97,6 +110,32 @@ async def login_submit(sema, session, username, password, csrf_token):
             return login_status
 
 
+async def logout(sema, session):
+    headers = {
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'DNT': '1',
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,'
+                  'application/signed-exchange;v=b3;q=0.9',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-User': '?1',
+        'Sec-Fetch-Dest': 'document',
+        'Referer': 'https://pay.performancefoodservice.com/ngs/NGS_ACH_Home?&trail=A659875',
+        'Accept-Language': 'en-US,en;q=0.9,pa;q=0.8',
+    }
+
+    async with sema:
+        async with session.get('https://pay.performancefoodservice.com/ngs/NGS_A_Logout', headers=headers) as request:
+            response = await request.content.read()
+            content = response.decode('utf-8')
+            if 'NGS_A_ProcessLogin' in content:
+                return True
+            else:
+                return False
+
+
 async def get_accounts(sema, session):
     endpoint = '/NGS_ACH_Home'
 
@@ -138,6 +177,8 @@ async def get_bills(sema, session, location_id, bill_type):
         endpoint = '/NGS_ACI_ListInvoices'
     elif bill_type == 'credit':
         endpoint = '/NGS_ACI_ListCredits'
+    else:
+        return None
 
     headers = {
         'Connection': 'keep-alive',
@@ -212,7 +253,7 @@ async def parse_bills(content, location_name, start_date, end_date, bill_type):
                             'type': bill_type,
                         }
                     )
-    print('  >', len(output), bill_type)
+    # print('  >', len(output), bill_type)
     return output
 
 
@@ -300,51 +341,57 @@ async def download_pdf(sema, session, pdf_link, download_path, bill_num):
     return False
 
 
-async def bulk_download(sema, session, bill_link, bill_num):
+async def bulk_download(sema, session, download_path, bill_link, bill_num):
     redirect_to_pdf_link = await load_bill_page(sema, session, bill_link)
     pdf_link = await load_pdf_page(sema, session, redirect_to_pdf_link)
     # file_path =
-    await download_pdf(sema, session, pdf_link, 'Downloads', bill_num)
+    await download_pdf(sema, session, pdf_link, download_path, bill_num)
 
 
-async def download_data(start_date, end_date, username, password):
+async def download_data(start_date, end_date, username, password, download_path, locations):
     tasks = []
     # total_files = 0  # number of files downloaded
     timeout = aiohttp.ClientTimeout(total=TIMEOUT)
     conn = aiohttp.TCPConnector(limit=5, limit_per_host=5)
-    cookies = {
-        'ASP.NET_SessionId': 'ryuhiw5mmoibzjywhvadyzqi',
-    }
     sema = asyncio.Semaphore(LIMIT)
-    async with aiohttp.ClientSession(connector=conn, timeout=timeout, cookies=cookies) as session:
-
+    async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
         csrf_token = await login_load_page(sema, session)
         login_status = await login_submit(sema, session, username, password, csrf_token)
         if not login_status:
-            print(' > Could not login! Please check username and password.')
+            print(' > Error: Could not login! Please check username and password.')
             return None
         else:
             print(' > Login successful!')
             accounts = await get_accounts(sema, session)
             for account in accounts:
+                location_folder = get_location_folder_name(locations, account['name'])
+                sub_folder_path = os.path.join(download_path, location_folder)
                 bills_content = await get_bills(sema, session, account['id'], 'bill')
                 credits_content = await get_bills(sema, session, account['id'], 'credit')
                 bills = await parse_bills(bills_content, account['name'], start_date, end_date, 'bill')
                 bill_credits = await parse_bills(credits_content, account['name'], start_date, end_date, 'credit')
                 for bill in bills:
-                    tasks.append(bulk_download(sema, session, bill['link'], bill['bill_num']))
+                    tasks.append(bulk_download(sema, session, sub_folder_path, bill['link'], bill['bill_num']))
                 for credit in bill_credits:
-                    tasks.append(bulk_download(sema, session, credit['link'], credit['bill_num']))
+                    tasks.append(bulk_download(sema, session, sub_folder_path, credit['link'], credit['bill_num']))
 
-        if tasks:
-            # await asyncio.wait(tasks)
-            loop = asyncio.get_event_loop()
-            for future in asyncio.as_completed(tasks, loop=loop):
-                await future
+            if tasks:
+                print(f' > Downloading {len(tasks)} documents:')
+                # await asyncio.wait(tasks)
+                loop = asyncio.get_event_loop()
+                document_count = 0
+                for future in asyncio.as_completed(tasks, loop=loop):
+                    await future
+                    document_count += 1
+                print(f'\tDownloaded {document_count} of {len(tasks)}')
+            # logout
+            logout_status = await logout(sema, session)
+            if logout_status:
+                print('> Logged out!')
 
 
-async def main_task(start_date, end_date, username, password):
-    await download_data(start_date, end_date, username, password)
+async def main_task(start_date, end_date, username, password, download_path, locations):
+    await download_data(start_date, end_date, username, password, download_path, locations)
     
 
 class PerformanceFoods:
@@ -353,23 +400,16 @@ class PerformanceFoods:
         self.password = None
         self.start_date = None
         self.end_date = None
+        self.download_path = 'Downloads'
+        self.locations = load_location_settings()
 
-    def run(self):
-        start_time = time.perf_counter()
+    def download(self):
+        # start_time = time.perf_counter()
         loop = asyncio.new_event_loop()
         future = asyncio.ensure_future(
-            main_task(self.start_date, self.end_date, self.username, self.password), loop=loop
+            main_task(self.start_date, self.end_date, self.username, self.password, self.download_path, self.locations), loop=loop
         )
         loop.run_until_complete(future)
-        end_time = time.perf_counter()
-        time_taken = time.strftime("%H:%M:%S", time.gmtime(int(end_time - start_time)))
-        print(f'Finished Downloading.\nTime Taken: {time_taken}')
-
-
-if __name__ == '__main__':
-    pf = PerformanceFoods()
-    pf.start_date = datetime(2020, 12, 1)
-    pf.end_date = datetime(2021, 1, 14)
-    pf.username = 'KHannon'
-    pf.password = 'Church@123'
-    pf.run()
+        # end_time = time.perf_counter()
+        # time_taken = time.strftime("%H:%M:%S", time.gmtime(int(end_time - start_time)))
+        # print(f'\nFinished Downloading.\nTime Taken: {time_taken}')

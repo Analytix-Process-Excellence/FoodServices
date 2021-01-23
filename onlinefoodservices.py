@@ -1,33 +1,31 @@
 import asyncio
 import aiohttp
-import time
 from bs4 import BeautifulSoup
 import re
 import os
+import csv
 from xhtml2pdf import pisa
 from datetime import datetime
+from settings import USER_AGENT, LIMIT, TIMEOUT
 
 
 BASE_URL = 'https://eastern5.onlinefoodservice.com'
-
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 ' \
-             'Safari/537.36'
-
-LIMIT = 3  # number of connections
-
-TIMEOUT = 600  # seconds
 
 
 class OnlineFoodService:
     def __init__(self):
         self.username = None
         self.password = None
-        self.locations = []
+        self.accounts = []
         self.session_id = None
         self.start_date = datetime(2020, 12, 1)
         self.end_date = datetime.today()
+        self.download_path = 'Downloads'
+        self.locations = []
+        self.load_location_settings()
+        self.sub_folder_path = ''
 
-    async def login(self, sema, session, username, password):
+    async def login(self, sema, session):
         endpoint = '/pnet/eOrderServlet'
 
         headers = {
@@ -59,8 +57,8 @@ class OnlineFoodService:
             'BrowserVersion': USER_AGENT,
             'lang': '',
             'ScreenRes': '1080',
-            'UserName': username,
-            'Password': password
+            'UserName': self.username,
+            'Password': self.password
         }
 
         async with sema:
@@ -75,6 +73,62 @@ class OnlineFoodService:
                 else:
                     return False
 
+    async def logout(self, sema, session):
+        headers = {
+            'Connection': 'keep-alive',
+            'Cache-Control': 'max-age=0',
+            'Origin': 'https://eastern5.onlinefoodservice.com',
+            'Upgrade-Insecure-Requests': '1',
+            'DNT': '1',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,'
+                      '*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-User': '?1',
+            'Sec-Fetch-Dest': 'document',
+            # 'Referer': 'https://eastern5.onlinefoodservice.com/pnet/Dashboard.jsp',
+            'Accept-Language': 'en-US,en;q=0.9,pa;q=0.8',
+        }
+
+        data = {
+            'SCRNFRME': '_top',
+            'SCRNSESSIONID': self.session_id,
+            'SCRNSRCE': 'DASHBOARD',
+            'SCRNDEST': 'SIGNOFF',
+            'SCRNCMD': 'SIGNOFF',
+            'SCRNOPT1': '',
+            'SCRNOPT2': '',
+            'SCRNMENU': 'main',
+            'MessageId': '',
+            'invoicenumber': '',
+            'invoiceRowIndex': '',
+            'invoicetotal': '',
+            'invoicetype': '',
+            'customer': '',
+            'deliveryconfirmation': '',
+            'refinvoicenumber': '',
+            'allowaccess': '',
+            'classes': True,
+            'cats': True,
+            'fams': False,
+            'brands': True,
+            'nacs': False,
+            'attributes': False,
+            'autocomplete': False
+        }
+
+        async with sema:
+            async with session.post('https://eastern5.onlinefoodservice.com/pnet/eOrderServlet', headers=headers,
+                                    data=data) as request:
+                response = await request.content.read()
+                content = response.decode('utf-8')
+                if 'username' in content or 'password' in content or 'Internal Server Error' in content:
+                    return True
+                else:
+                    return False
+
     async def get_session_id(self, content):
         session_id_text_pattern = re.compile(r"var screenSessionID = '(.+?)';", re.MULTILINE)
         session_id_regex = re.search(session_id_text_pattern, content)
@@ -84,19 +138,35 @@ class OnlineFoodService:
 
     async def get_accounts(self, content):
         bs = BeautifulSoup(content, 'html.parser')
-        location_dropdown_element = bs.find('select', attrs={'name': 'selectedCustomer'})
-        if location_dropdown_element:
-            location_options_elements = location_dropdown_element.find_all('option')
-            for element in location_options_elements:
-                self.locations.append(
+        account_dropdown_element = bs.find('select', attrs={'name': 'selectedCustomer'})
+        if account_dropdown_element:
+            account_options_elements = account_dropdown_element.find_all('option')
+            for element in account_options_elements:
+                self.accounts.append(
                     {
                         'id': element.get('value'),
                         'name': element.text
                     }
                 )
+        return self.accounts
+
+    def load_location_settings(self):
+        location_settings_file_path = 'location_settings.csv'
+        if not os.path.isfile(location_settings_file_path):
+            return None
+        with open(location_settings_file_path, 'r') as location_settings:
+            reader = csv.DictReader(location_settings)
+            for row in reader:
+                self.locations.append(row)
         return self.locations
 
-    async def set_account(self, sema, session, location_id):
+    def get_location_folder_name(self, account_name):
+        for location in self.locations:
+            if location.get('AccountName') == account_name:
+                return location.get('SubFolderName')
+        return ''
+
+    async def set_account(self, sema, session, account_id):
         endpoint = '/pnet/eOrderServlet'
 
         headers = {
@@ -123,7 +193,7 @@ class OnlineFoodService:
             'SCRNSRCE': 'DASHBOARD',
             'SCRNDEST': 'DASHBOARD',
             'SCRNCMD': 'init',
-            'SCRNOPT1': location_id,
+            'SCRNOPT1': account_id,
             'SCRNOPT2': '',
             'SCRNMENU': '',
             'MessageId': '',
@@ -320,23 +390,50 @@ class OnlineFoodService:
             'Accept-Language': 'en-US,en;q=0.9,pa;q=0.8',
         }
 
+        # data = {
+        #     'SCRNFRME': 'Content',
+        #     'SCRNSESSIONID': self.session_id,
+        #     'SCRNSRCE': 'ACCOUNTREV',
+        #     'SCRNDEST': 'INVOICEIQ',
+        #     'SCRNCMD': 'view',
+        #     'SCRNOPT1': '',
+        #     'SCRNOPT2': '',
+        #     'SCRNMENU': '',
+        #     'webnowurl': '',
+        #     'invoicenumber': adj_num,
+        #     'invoicetotal': str(amount),
+        #     'invoiceRowIndex': str(row_index),
+        #     'invoicetype': 'Adj',
+        #     'customer': '',
+        #     'deliveryconfirmation': '',
+        #     'refinvoicenumber': ref_num
+        # }
+
         data = {
             'SCRNFRME': 'Content',
             'SCRNSESSIONID': self.session_id,
-            'SCRNSRCE': 'ACCOUNTREV',
+            'SCRNSRCE': 'DASHBOARD',
             'SCRNDEST': 'INVOICEIQ',
             'SCRNCMD': 'view',
             'SCRNOPT1': '',
             'SCRNOPT2': '',
             'SCRNMENU': '',
-            'webnowurl': '',
-            'invoicenumber': adj_num,
-            'invoicetotal': str(amount),
+            'MessageId': '',
+            'invoicenumber': ref_num,
             'invoiceRowIndex': str(row_index),
+            'invoicetotal': str(amount),
             'invoicetype': 'Adj',
-            'customer': '',
+            # 'customer': '55039955',
             'deliveryconfirmation': '',
-            'refinvoicenumber': ref_num
+            'refinvoicenumber': ref_num,
+            'allowaccess': '',
+            'classes': True,
+            'cats': True,
+            'fams': False,
+            'brands': True,
+            'nacs': False,
+            'attributes': False,
+            'autocomplete': False
         }
 
         async with sema:
@@ -345,7 +442,9 @@ class OnlineFoodService:
                 response = await request.content.read()
                 # content = response.decode('utf-8')
                 if response:
-                    output_file_name = os.path.join('Downloads', f'{adj_num}.pdf')
+                    output_folder = os.path.join(self.download_path, self.sub_folder_path)
+                    os.makedirs(output_folder, exist_ok=True)
+                    output_file_name = os.path.join(output_folder, f'{ref_num}.pdf')
                     save_status = await self.convert_html_to_pdf(response, output_file_name)
                     return save_status
 
@@ -365,50 +464,54 @@ class OnlineFoodService:
         return pisa_status.err
 
     async def save_pdf(self, bill_num, content):
-        folder_path = os.path.join(os.getcwd(), 'Downloads')
+        folder_path = os.path.join(self.download_path, self.sub_folder_path)
         file_name = f'{bill_num}.pdf'
         os.makedirs(folder_path, exist_ok=True)
         with open(os.path.join(folder_path, file_name), 'wb') as output_file:
             output_file.write(content)
 
-    async def download(self, username, password):
+    async def download_data(self):
         timeout = aiohttp.ClientTimeout(total=TIMEOUT)
         conn = aiohttp.TCPConnector(limit=5, limit_per_host=5)
         sema = asyncio.Semaphore(LIMIT)
         async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
-            login_status = await self.login(sema, session, username, password)
+            login_status = await self.login(sema, session)
             # if login_status is true means sign in was successful
             if not login_status:
-                print('Could not login!')
+                print(' > Error: Could not login! Please check username and password')
             else:
-                print('Logged in successfully')
-                for location in self.locations:
-                    await self.set_account(sema, session, location['id'])
+                print(' > Logged in successfully')
+                for account in self.accounts:
+                    # print(f' > Account: {account["name"]}')
+                    self.sub_folder_path = self.get_location_folder_name(account['name'])
+                    print('Location:', self.sub_folder_path)
+                    await self.set_account(sema, session, account['id'])
                     bill_details = await self.get_bills(sema, session)
                     bill_list = await self.parse_bill_list(bill_details)
+                    print(f'\tDownloading {len(bill_list)} documents')
                     tasks = []
                     for bill in bill_list:
+                        # if bill['type'] == 'Invoice':
+                        #     tasks.append(self.download_bill(sema, session, bill['bill_num']))
+                        # elif bill['type'] == 'Adj':
+                        #     tasks.append(self.download_adj(
+                        #             sema, session, bill['bill_num'], bill['ref_num'], bill['amount'], bill['row_index']
+                        #         ))
                         if bill['type'] == 'Invoice':
                             await self.download_bill(sema, session, bill['bill_num'])
                         elif bill['type'] == 'Adj':
                             await self.download_adj(
                                     sema, session, bill['bill_num'], bill['ref_num'], bill['amount'], bill['row_index']
                                 )
-                    if tasks:
-                        loop = asyncio.get_event_loop()
-                        await asyncio.gather(*tasks, loop=loop)
+                    # if tasks:
+                    #     loop = asyncio.get_event_loop()
+                    #     for future in asyncio.as_completed(tasks, loop=loop):
+                    #         await future
+                logout_status = await self.logout(sema, session)
+                if logout_status:
+                    print('>Logged out!')
 
-    async def main_task(self):
-        # https://eastern5.onlinefoodservice.com/pnet/eOrderServlet
-        await self.download(username='55039449', password='34580')
-
-
-if __name__ == '__main__':
-    onlinefoodservices = OnlineFoodService()
-    start_time = time.perf_counter()
-    loop = asyncio.new_event_loop()
-    future = asyncio.ensure_future(onlinefoodservices.main_task(), loop=loop)
-    loop.run_until_complete(future)
-    end_time = time.perf_counter()
-    time_taken = time.strftime("%H:%M:%S", time.gmtime(int(end_time - start_time)))
-    print(f'Finished Downloading.\nTime Taken: {time_taken}')
+    def download(self):
+        loop = asyncio.new_event_loop()
+        future = asyncio.ensure_future(self.download_data(), loop=loop)
+        loop.run_until_complete(future)
