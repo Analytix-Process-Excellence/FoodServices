@@ -350,7 +350,7 @@ async def bulk_download(sema, session, download_path, bill_link, bill_num):
 
 async def download_data(start_date, end_date, username, password, download_path, locations):
     tasks = []
-    # total_files = 0  # number of files downloaded
+    total_files = 0  # number of files downloaded
     timeout = aiohttp.ClientTimeout(total=TIMEOUT)
     conn = aiohttp.TCPConnector(limit=5, limit_per_host=5)
     sema = asyncio.Semaphore(LIMIT)
@@ -365,6 +365,8 @@ async def download_data(start_date, end_date, username, password, download_path,
             accounts = await get_accounts(sema, session)
             for account in accounts:
                 location_folder = get_location_folder_name(locations, account['name'])
+                if location_folder == '' or not location_folder:
+                    print(f' > Please update location_settings.csv for account: \n{account["name"]}')
                 sub_folder_path = os.path.join(download_path, location_folder)
                 bills_content = await get_bills(sema, session, account['id'], 'bill')
                 credits_content = await get_bills(sema, session, account['id'], 'credit')
@@ -375,8 +377,10 @@ async def download_data(start_date, end_date, username, password, download_path,
                 for credit in bill_credits:
                     tasks.append(bulk_download(sema, session, sub_folder_path, credit['link'], credit['bill_num']))
 
-            if tasks:
-                print(f' > Downloading {len(tasks)} documents:')
+            if not tasks:
+                print('\tNothing to download')
+            else:
+                print(f'\tDownloading {len(tasks)} files')
                 # await asyncio.wait(tasks)
                 loop = asyncio.get_event_loop()
                 document_count = 0
@@ -384,15 +388,18 @@ async def download_data(start_date, end_date, username, password, download_path,
                     await future
                     document_count += 1
                 print(f'\tDownloaded {document_count} of {len(tasks)}')
+                total_files += document_count
             # logout
             logout_status = await logout(sema, session)
             if logout_status:
                 print('> Logged out!')
+    return total_files
 
 
 async def main_task(start_date, end_date, username, password, download_path, locations):
-    await download_data(start_date, end_date, username, password, download_path, locations)
-    
+    total_files = await download_data(start_date, end_date, username, password, download_path, locations)
+    return total_files
+
 
 class PerformanceFoods:
     def __init__(self):
@@ -409,7 +416,7 @@ class PerformanceFoods:
         future = asyncio.ensure_future(
             main_task(self.start_date, self.end_date, self.username, self.password, self.download_path, self.locations), loop=loop
         )
-        loop.run_until_complete(future)
+        return loop.run_until_complete(future)
         # end_time = time.perf_counter()
         # time_taken = time.strftime("%H:%M:%S", time.gmtime(int(end_time - start_time)))
         # print(f'\nFinished Downloading.\nTime Taken: {time_taken}')

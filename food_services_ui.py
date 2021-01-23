@@ -15,6 +15,7 @@ sg.theme('Dark2')  # set window color theme
 
 def download_data(start_date, end_date, clients):
     start_time = time.perf_counter()
+    total_files = 0
     for client in clients:
         print('\nClient:', client.get('client'))
         if client.get('group') == 'OnlineFood':
@@ -24,7 +25,7 @@ def download_data(start_date, end_date, clients):
             vendor.username = client.get('username')
             vendor.password = client.get('password')
             vendor.download_path = client.get('download_path')
-            vendor.download()
+            total_files += vendor.download()
         elif client.get('group') == 'PerfFood':
             vendor = PerformanceFoods()
             vendor.start_date = start_date
@@ -32,10 +33,11 @@ def download_data(start_date, end_date, clients):
             vendor.username = client.get('username')
             vendor.password = client.get('password')
             vendor.download_path = client.get('download_path')
-            vendor.download()
+            total_files += vendor.download()
     end_time = time.perf_counter()
     time_taken = time.strftime("%H:%M:%S", time.gmtime(int(end_time - start_time)))
     print('\nFinished!')
+    print(f'Total Downloads: {total_files} files')
     print(f'Time Taken: {time_taken}')
 
 
@@ -150,6 +152,7 @@ def run_gui(thread=None):
             if start_date > end_date:
                 sg.Popup('Start Date cannot be greater than End date.', title='Error in date range')
                 continue
+            print(f'From: {start_date.strftime("%m/%d/%Y")}', f'To: {end_date.strftime("%m/%d/%Y")}')
             # output_path = values['output_path']
             selected_clients = values['client_list']
             if not selected_clients:

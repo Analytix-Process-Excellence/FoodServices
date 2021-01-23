@@ -1,3 +1,6 @@
 /venv/
 /location_settings.csv
 /client_settings.json
+/Downloads/
+/build/
+/dist/

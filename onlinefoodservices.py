@@ -471,6 +471,7 @@ class OnlineFoodService:
             output_file.write(content)
 
     async def download_data(self):
+        total_files = 0
         timeout = aiohttp.ClientTimeout(total=TIMEOUT)
         conn = aiohttp.TCPConnector(limit=5, limit_per_host=5)
         sema = asyncio.Semaphore(LIMIT)
@@ -481,15 +482,23 @@ class OnlineFoodService:
                 print(' > Error: Could not login! Please check username and password')
             else:
                 print(' > Logged in successfully')
+
                 for account in self.accounts:
                     # print(f' > Account: {account["name"]}')
                     self.sub_folder_path = self.get_location_folder_name(account['name'])
-                    print('Location:', self.sub_folder_path)
+                    if self.sub_folder_path == '' or not self.sub_folder_path:
+                        print(f' > Please update location_settings.csv for account: \n{account["name"]}')
+                    else:
+                        print(f' > Location: {self.sub_folder_path}')
                     await self.set_account(sema, session, account['id'])
                     bill_details = await self.get_bills(sema, session)
                     bill_list = await self.parse_bill_list(bill_details)
-                    print(f'\tDownloading {len(bill_list)} documents')
-                    tasks = []
+                    if bill_list:
+                        print(f'\tDownloading {len(bill_list)} files')
+                    else:
+                        print(f'\tNothing to download!')
+                    # tasks = []
+                    document_count = 0
                     for bill in bill_list:
                         # if bill['type'] == 'Invoice':
                         #     tasks.append(self.download_bill(sema, session, bill['bill_num']))
@@ -499,19 +508,27 @@ class OnlineFoodService:
                         #         ))
                         if bill['type'] == 'Invoice':
                             await self.download_bill(sema, session, bill['bill_num'])
+                            document_count += 1
                         elif bill['type'] == 'Adj':
                             await self.download_adj(
                                     sema, session, bill['bill_num'], bill['ref_num'], bill['amount'], bill['row_index']
                                 )
+                            document_count += 1
+                    if document_count > 0:
+                        print(f'\tDownloaded {document_count} of {len(bill_list)}')
+                        total_files += document_count
+
                     # if tasks:
                     #     loop = asyncio.get_event_loop()
                     #     for future in asyncio.as_completed(tasks, loop=loop):
                     #         await future
+
                 logout_status = await self.logout(sema, session)
                 if logout_status:
                     print('>Logged out!')
+        return total_files
 
     def download(self):
         loop = asyncio.new_event_loop()
         future = asyncio.ensure_future(self.download_data(), loop=loop)
-        loop.run_until_complete(future)
+        return loop.run_until_complete(future)
